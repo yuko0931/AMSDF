@@ -12,7 +12,7 @@ __email__ = "wujy298@mail2.sysu.edu.cn"
 
 
 class ASVspoof2019LA(Dataset):
-    def __init__(self,part,  path="/data/wujy/audio/asvspoof/ASVspoof2019_LA"):
+    def __init__(self,part,  path="/data4/lm/datasets/LA"):
         self.part = part
         if self.part == "train":
             protocol_path=os.path.join(path, "ASVspoof2019_LA_cm_protocols","ASVspoof2019.LA.cm.train.trn.txt")
@@ -81,7 +81,7 @@ class ASVspoof2019LA(Dataset):
  
     
 class ASVspoof2021LA(ASVspoof2019LA):
-    def __init__(self, part,path="/data/wujy/audio/asvspoof"):
+    def __init__(self, part,path="/data4/lm/datasets"):
         self.label_dict={"bonafide":REAL, "spoof":FAKE}
         self.path=os.path.join(path,"ASVspoof2021_LA_eval")
         protocol_path="./tools/evaluate/keys/LA-keys-stage-1/keys/CM/trial_metadata.txt"
@@ -231,7 +231,7 @@ class inthewild(ASVspoof2019LA):
     
 
 class FakeAVCeleb(ASVspoof2019LA):
-    def __init__(self, part, path="/data/wujy/audio/fac/FakeAVCeleb_v1.2"):
+    def __init__(self, part, path="/data4/lm/datasets/FakeAVCeleb_v1.2"):
         protocol_path=os.path.join(path, "meta_data.csv")
         self.label_dict={"RealVideo-RealAudio":REAL, "RealVideo-FakeAudio":FAKE,"FakeVideo-RealAudio":REAL, "FakeVideo-FakeAudio":FAKE}
         self.path = path
@@ -267,7 +267,7 @@ class FakeAVCeleb(ASVspoof2019LA):
         return featureTensor, SpecTensor, label, filename
 
 class FoR(ASVspoof2019LA):
-    def __init__(self,part="dev", path="/data/wujy/audio/for/for-original"):
+    def __init__(self,part="dev", path="/data4/lm/datasets/for/for-original"):
         part=part.replace("eval","testing").replace("dev","validation")
         self.label_dict={"real":REAL, "fake":FAKE}
         self.path=os.path.join(path,part)
