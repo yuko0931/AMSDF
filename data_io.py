@@ -5,15 +5,40 @@ from torch.utils.data import Dataset, DataLoader, ConcatDataset
 import python_speech_features as ps
 from tqdm import tqdm
 import librosa
+import random
 REAL=1
 FAKE=0
 __author__ = "JunyanWu"
 __email__ = "wujy298@mail2.sysu.edu.cn"
 
 
+def apply_masked_spec(spec, time_width=12, freq_width=6, num_masks=2, p=0.5):
+    """
+    Spec-level augmentation: randomly mask time and frequency blocks.
+    spec: numpy array [C, T, F] or [T, F]
+    """
+    if random.random() > p:
+        return spec
+    spec_np = np.array(spec, copy=True)
+    if spec_np.ndim == 2:
+        spec_np = spec_np[None, ...]
+    _, T, F = spec_np.shape
+    for _ in range(num_masks):
+        # time mask
+        tw = random.randint(1, max(1, min(time_width, T)))
+        t0 = random.randint(0, max(0, T - tw))
+        spec_np[:, t0:t0 + tw, :] = 0
+        # freq mask
+        fw = random.randint(1, max(1, min(freq_width, F)))
+        f0 = random.randint(0, max(0, F - fw))
+        spec_np[:, :, f0:f0 + fw] = 0
+    return spec_np
+
+
 class ASVspoof2019LA(Dataset):
-    def __init__(self,part,  path="/data4/lm/datasets/LA"):
+    def __init__(self,part,  path="/data4/lm/datasets/LA", spec_mask_cfg=None):
         self.part = part
+        self.spec_mask_cfg = spec_mask_cfg
         if self.part == "train":
             protocol_path=os.path.join(path, "ASVspoof2019_LA_cm_protocols","ASVspoof2019.LA.cm.train.trn.txt")
         elif self.part == "dev":
@@ -40,6 +65,7 @@ class ASVspoof2019LA(Dataset):
         featureTensor = self.load_audio(filepath)
         featureTensor = self.pad(featureTensor)
         SpecTensor = self.extract_mel(featureTensor)
+        SpecTensor = self._apply_spec_mask(SpecTensor)
         featureTensor = torch.tensor(torch.Tensor(featureTensor), dtype=torch.float32)
         SpecTensor = torch.tensor(torch.Tensor(SpecTensor), dtype=torch.float32)
         featureTensor = torch.squeeze(featureTensor,dim=0)
@@ -60,6 +86,17 @@ class ASVspoof2019LA(Dataset):
         delta2 = ps.delta(delta1, 2)
         fea=[mel_spec[begin:end,:],delta1[begin:end,:],delta2[begin:end,:]]
         return np.array(fea,dtype=float)
+
+    def _apply_spec_mask(self, spec):
+        if self.spec_mask_cfg and self.part == "train":
+            return apply_masked_spec(
+                spec,
+                time_width=self.spec_mask_cfg.get("time_width",12),
+                freq_width=self.spec_mask_cfg.get("freq_width",6),
+                num_masks=self.spec_mask_cfg.get("num_masks",2),
+                p=self.spec_mask_cfg.get("p",0.0),
+            )
+        return spec
     
     def pad(self, x, max_len=64600):
         x_len = x.shape[0]
@@ -81,7 +118,7 @@ class ASVspoof2019LA(Dataset):
  
     
 class ASVspoof2021LA(ASVspoof2019LA):
-    def __init__(self, part,path="/data4/lm/datasets"):
+    def __init__(self, part,path="/data4/lm/datasets", spec_mask_cfg=None):
         self.label_dict={"bonafide":REAL, "spoof":FAKE}
         self.path=os.path.join(path,"ASVspoof2021_LA_eval")
         protocol_path="./tools/evaluate/keys/LA-keys-stage-1/keys/CM/trial_metadata.txt"
@@ -90,6 +127,8 @@ class ASVspoof2021LA(ASVspoof2019LA):
         if part=="eval":
             protocol_mask=(protocol[:,7]=="eval")
             self.protocol=protocol[protocol_mask]
+        self.part = part
+        self.spec_mask_cfg = spec_mask_cfg
         attack2spooflabel={
             "none":"L01",
             "alaw":"L02",
@@ -118,6 +157,7 @@ class ASVspoof2021LA(ASVspoof2019LA):
         featureTensor = self.load_audio(filepath)
         featureTensor = self.pad(featureTensor)
         SpecTensor = self.extract_mel(featureTensor)
+        SpecTensor = self._apply_spec_mask(SpecTensor)
         featureTensor = torch.tensor(torch.Tensor(featureTensor), dtype=torch.float32)
         SpecTensor = torch.tensor(torch.Tensor(SpecTensor), dtype=torch.float32)
         featureTensor = torch.squeeze(featureTensor,dim=0)
@@ -132,7 +172,7 @@ class ASVspoof2021LA(ASVspoof2019LA):
         return ans
 
 class ASVspoof2021DF(ASVspoof2019LA):
-    def __init__(self, part,path="/data/wujy/audio/asvspoof"):
+    def __init__(self, part,path="/data/wujy/audio/asvspoof", spec_mask_cfg=None):
         self.label_dict={"bonafide":REAL, "spoof":FAKE}
         self.path=os.path.join(path,"ASVspoof2021_DF_eval")
         protocol_path="./tools/evaluate/keys/DF-keys-stage-1/keys/CM/trial_metadata.txt"
@@ -141,6 +181,8 @@ class ASVspoof2021DF(ASVspoof2019LA):
         if part=="eval":
             protocol_mask=(protocol[:,7]=="eval")
             self.protocol=protocol[protocol_mask]
+        self.part = part
+        self.spec_mask_cfg = spec_mask_cfg
         attack2spooflabel={
             "bonafide":"bonafide",
             "nocodec":"D01",
@@ -170,6 +212,7 @@ class ASVspoof2021DF(ASVspoof2019LA):
         featureTensor = self.load_audio(filepath)
         featureTensor = self.pad(featureTensor)
         SpecTensor = self.extract_mel(featureTensor)
+        SpecTensor = self._apply_spec_mask(SpecTensor)
         featureTensor = torch.tensor(torch.Tensor(featureTensor), dtype=torch.float32)
         SpecTensor = torch.tensor(torch.Tensor(SpecTensor), dtype=torch.float32)
         featureTensor = torch.squeeze(featureTensor,dim=0)
@@ -184,8 +227,9 @@ class ASVspoof2021DF(ASVspoof2019LA):
         return ans
     
 class ASVspoof2015(ASVspoof2019LA):
-    def __init__(self,part,path="/data/wujy/audio/asvspoof/ASVspoof2015" ):
+    def __init__(self,part,path="/data/wujy/audio/asvspoof/ASVspoof2015", spec_mask_cfg=None ):
         self.part = part
+        self.spec_mask_cfg = spec_mask_cfg
         if self.part == "train":
             protocol_path=os.path.join(path, "CM_protocol","cm_train.trn")
         elif self.part == "dev":
@@ -205,17 +249,20 @@ class ASVspoof2015(ASVspoof2019LA):
         featureTensor = self.load_audio(filepath)
         featureTensor = self.pad(featureTensor)
         SpecTensor = self.extract_mel(featureTensor)
+        SpecTensor = self._apply_spec_mask(SpecTensor)
         featureTensor = torch.tensor(torch.Tensor(featureTensor), dtype=torch.float32)
         SpecTensor = torch.tensor(torch.Tensor(SpecTensor), dtype=torch.float32)
         featureTensor = torch.squeeze(featureTensor,dim=0)
         return featureTensor, SpecTensor, label, filename
     
 class inthewild(ASVspoof2019LA):
-    def __init__(self,path="/data/wujy/audio/inthewild/release_in_the_wild"):
+    def __init__(self,path="/data/wujy/audio/inthewild/release_in_the_wild", spec_mask_cfg=None):
         protocol_path=os.path.join(path, "meta.csv")
         self.label_dict={"bona-fide":REAL, "spoof":FAKE}
         self.path = path
         self.protocol  = np.loadtxt(protocol_path,delimiter = ",",dtype=str)[1:]
+        self.part = "eval"
+        self.spec_mask_cfg = spec_mask_cfg
     def __getitem__(self, idx):
         protocol_idx=self.protocol[idx]
         filename = protocol_idx[0]
@@ -224,6 +271,7 @@ class inthewild(ASVspoof2019LA):
         featureTensor = self.load_audio(filepath)
         featureTensor = self.pad(featureTensor)
         SpecTensor = self.extract_mel(featureTensor)
+        SpecTensor = self._apply_spec_mask(SpecTensor)
         featureTensor = torch.tensor(torch.Tensor(featureTensor), dtype=torch.float32)
         SpecTensor = torch.tensor(torch.Tensor(SpecTensor), dtype=torch.float32)
         featureTensor = torch.squeeze(featureTensor,dim=0)
@@ -231,11 +279,13 @@ class inthewild(ASVspoof2019LA):
     
 
 class FakeAVCeleb(ASVspoof2019LA):
-    def __init__(self, part, path="/data4/lm/datasets/FakeAVCeleb_v1.2"):
+    def __init__(self, part, path="/data4/lm/datasets/FakeAVCeleb_v1.2", spec_mask_cfg=None):
         protocol_path=os.path.join(path, "meta_data.csv")
         self.label_dict={"RealVideo-RealAudio":REAL, "RealVideo-FakeAudio":FAKE,"FakeVideo-RealAudio":REAL, "FakeVideo-FakeAudio":FAKE}
         self.path = path
         self.protocol  = []
+        self.part = part
+        self.spec_mask_cfg = spec_mask_cfg
         lines=open(protocol_path,'r').readlines()
         for line in lines[1:]:
             line=line.rstrip('\n')
@@ -261,17 +311,20 @@ class FakeAVCeleb(ASVspoof2019LA):
         featureTensor = self.load_audio(filepath)
         featureTensor = self.pad(featureTensor)
         SpecTensor = self.extract_mel(featureTensor)
+        SpecTensor = self._apply_spec_mask(SpecTensor)
         featureTensor = torch.tensor(torch.Tensor(featureTensor), dtype=torch.float32)
         SpecTensor = torch.tensor(torch.Tensor(SpecTensor), dtype=torch.float32)
         featureTensor = torch.squeeze(featureTensor,dim=0)
         return featureTensor, SpecTensor, label, filename
 
 class FoR(ASVspoof2019LA):
-    def __init__(self,part="dev", path="/data4/lm/datasets/for/for-original"):
+    def __init__(self,part="dev", path="/data4/lm/datasets/for/for-original", spec_mask_cfg=None):
         part=part.replace("eval","testing").replace("dev","validation")
         self.label_dict={"real":REAL, "fake":FAKE}
         self.path=os.path.join(path,part)
         self.protocol=[os.path.join(i,kk) for i,j,k in os.walk(self.path) for kk in k]
+        self.part = part
+        self.spec_mask_cfg = spec_mask_cfg
         
     
     def __getitem__(self, idx):
@@ -285,38 +338,39 @@ class FoR(ASVspoof2019LA):
             featureTensor=featureTensor[0]
         featureTensor = self.pad(featureTensor)
         SpecTensor = self.extract_mel(featureTensor)
+        SpecTensor = self._apply_spec_mask(SpecTensor)
         featureTensor = torch.tensor(torch.Tensor(featureTensor), dtype=torch.float32)
         SpecTensor = torch.tensor(torch.Tensor(SpecTensor), dtype=torch.float32)
         featureTensor = torch.squeeze(featureTensor,dim=0)
         return featureTensor, SpecTensor, label, filename
 
 
-def get_dataloader(if_train=False,if_dev=False,if_eval=False,ename='',batch_size=16,num_workers=8):
+def get_dataloader(if_train=False,if_dev=False,if_eval=False,ename='',batch_size=16,num_workers=8,spec_mask_cfg=None):
     if if_train:
-        dst=ASVspoof2019LA(part='train')
+        dst=ASVspoof2019LA(part='train', spec_mask_cfg=spec_mask_cfg)
     elif if_dev:
-        dst1=ASVspoof2019LA(part='dev')
-        dst2=FoR(part='dev')
-        dst3=FakeAVCeleb(part='dev')
+        dst1=ASVspoof2019LA(part='dev', spec_mask_cfg=spec_mask_cfg)
+        dst2=FoR(part='dev', spec_mask_cfg=spec_mask_cfg)
+        dst3=FakeAVCeleb(part='dev', spec_mask_cfg=spec_mask_cfg)
         dst = ConcatDataset([dst1, dst2, dst3])
         del dst1,dst2,dst3
     else:
         if ename=='asvs2019la':
-            dst=ASVspoof2019LA(part="eval")
+            dst=ASVspoof2019LA(part="eval", spec_mask_cfg=spec_mask_cfg)
         elif ename=='asvs2015e':
-            dst=ASVspoof2015(part="eval")
+            dst=ASVspoof2015(part="eval", spec_mask_cfg=spec_mask_cfg)
         elif ename=='asvs2015d':
-            dst=ASVspoof2015(part="dev")
+            dst=ASVspoof2015(part="dev", spec_mask_cfg=spec_mask_cfg)
         elif ename=='asvs2021df':
-            dst=ASVspoof2021DF(part="eval")
+            dst=ASVspoof2021DF(part="eval", spec_mask_cfg=spec_mask_cfg)
         elif ename=='asvs2021la':
-            dst=ASVspoof2021LA(part="eval")
+            dst=ASVspoof2021LA(part="eval", spec_mask_cfg=spec_mask_cfg)
         elif ename=='fac':
-            dst=FakeAVCeleb(part="eval")
+            dst=FakeAVCeleb(part="eval", spec_mask_cfg=spec_mask_cfg)
         elif ename=='for':
-            dst=FoR(part="eval")
+            dst=FoR(part="eval", spec_mask_cfg=spec_mask_cfg)
         elif ename=='itw':
-            dst=inthewild()
+            dst=inthewild(spec_mask_cfg=spec_mask_cfg)
     dlr=torch.utils.data.DataLoader(dst, batch_size=batch_size,num_workers=num_workers, shuffle=if_train)
     del dst
     return dlr

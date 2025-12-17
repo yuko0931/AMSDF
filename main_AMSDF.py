@@ -105,17 +105,47 @@ if __name__ == '__main__':
     parser.add_argument('--emodel', type=str, default="./checkpoints/M1.pth",help="/path/to/load/pre-trained/models")
     parser.add_argument('--ename', type=str, default="itw")
     parser.add_argument('--score_path', type=str, default="./scores")
+    """Augmentation"""
+    parser.add_argument('--mspec-p', type=float, default=0.0, dest="mspec_p")
+    parser.add_argument('--mspec-time', type=int, default=12, dest="mspec_time")
+    parser.add_argument('--mspec-freq', type=int, default=6, dest="mspec_freq")
+    parser.add_argument('--mspec-num', type=int, default=2, dest="mspec_num")
+    parser.add_argument('--mfeat-p', type=float, default=0.0, dest="mfeat_p")
+    parser.add_argument('--mfeat-axis', type=str, default="time", dest="mfeat_axis", choices=["time","channel"])
+    parser.add_argument('--mfeat-max-ratio', type=float, default=0.2, dest="mfeat_max_ratio")
+    parser.add_argument('--moe-lora', action='store_true', default=False, help="Enable MoE-LoRA on wav2vec encoder")
+    parser.add_argument('--moe-lora-experts', type=int, default=3)
+    parser.add_argument('--moe-lora-rank', type=int, default=4)
+    parser.add_argument('--moe-lora-topk', type=int, default=2)
+    parser.add_argument('--moe-lora-router-noise', type=float, default=0.0)
     args = parser.parse_args()
     set_random_seed(args.seed)
     assert args.ename in ['asvs2019la', 'asvs2021la','asvs2021df','asvs2015d','asvs2015e','for','fac','itw']
-    model = AMSDF().cuda().float() 
+    spec_mask_cfg = None
+    if args.mspec_p > 0:
+        spec_mask_cfg = {
+            "p": args.mspec_p,
+            "time_width": args.mspec_time,
+            "freq_width": args.mspec_freq,
+            "num_masks": args.mspec_num,
+        }
+    model = AMSDF(
+        feature_mask_p=args.mfeat_p,
+        feature_mask_axis=args.mfeat_axis,
+        feature_mask_max_ratio=args.mfeat_max_ratio,
+        moe_lora_enable=args.moe_lora,
+        moe_lora_experts=args.moe_lora_experts,
+        moe_lora_rank=args.moe_lora_rank,
+        moe_lora_topk=args.moe_lora_topk,
+        moe_lora_router_noise=args.moe_lora_router_noise,
+    ).cuda().float() 
     """Testing"""
     if args.eval:
         print('Loading checkpoint from {}'.format(args.emodel))
         model.load_state_dict(torch.load(args.emodel), False)
         score_file=os.path.join(args.score_path,'%s'%os.path.basename(args.emodel).replace(".pth",""),"%s.txt"%(args.ename))
         os.makedirs(os.path.dirname(score_file),exist_ok=True)
-        eval_dlr = get_dataloader(batch_size=args.test_batch_size,num_workers=args.num_workers, if_eval=True, ename=args.ename)
+        eval_dlr = get_dataloader(batch_size=args.test_batch_size,num_workers=args.num_workers, if_eval=True, ename=args.ename, spec_mask_cfg=spec_mask_cfg)
         eval_eer=produce_evaluation_file(eval_dlr, model, save_path=score_file)
         print('Evaluating {} dataset, EER={:.4f}'.format(args.ename, eval_eer))
         sys.exit(0)
@@ -125,8 +155,8 @@ if __name__ == '__main__':
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     if not os.path.exists(model_save_path) and args.save:
         os.makedirs(model_save_path, exist_ok=True)
-    train_dlr = get_dataloader(batch_size=args.batch_size,num_workers=args.num_workers, if_train=True)
-    dev_dlr = get_dataloader(batch_size=args.test_batch_size,num_workers=args.num_workers, if_dev=True)
+    train_dlr = get_dataloader(batch_size=args.batch_size,num_workers=args.num_workers, if_train=True, spec_mask_cfg=spec_mask_cfg)
+    dev_dlr = get_dataloader(batch_size=args.test_batch_size,num_workers=args.num_workers, if_dev=True, spec_mask_cfg=None)
     best_dev_eer=999
     stop=0
     for epoch in range(1, args.num_epoch+1):

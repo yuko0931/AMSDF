@@ -87,10 +87,59 @@ There is no need for an audio-view pre-trained model, as it aims to detect spoof
 ### 3.2 Run 🚀
 Please ensure you have downloaded all development datasets listed in the evaluation table, as we use three development datasets (not just ASVS2019LA) to select the best model.
 
-```
+**Basic training (without data augmentation):**
+```bash
 python main_AMSDF.py -bs 12 -tbs 64 --num_epoch 15 --seed 1234 --save
 python main_AMSDF.py -bs 12 -tbs 64 --num_epoch 15 --seed 42 --save
 ```
+
+**Training with data augmentation (MaskedSpec + MaskedFeature):**
+```bash
+python main_AMSDF.py -bs 12 -tbs 64 --num_epoch 15 --seed 1234 --save \
+  --mspec-p 0.5 --mspec-time 20 --mspec-freq 8 --mspec-num 2 \
+  --mfeat-p 0.2 --mfeat-axis time --mfeat-max-ratio 0.2
+
+python main_AMSDF.py -bs 12 -tbs 64 --num_epoch 15 --seed 42 --save \
+  --mspec-p 0.5 --mspec-time 20 --mspec-freq 8 --mspec-num 2 \
+  --mfeat-p 0.2 --mfeat-axis time --mfeat-max-ratio 0.2
+```
+
+**Training with MoE-LoRA only (improve OOD generalization; LoRA/router are trainable in wav2vec2 projections):**
+```bash
+# Sparse gating (top-k=2), 3 experts, rank=4
+python main_AMSDF.py -bs 12 -tbs 64 --num_epoch 15 --seed 1234 --save \
+  --moe-lora --moe-lora-experts 3 --moe-lora-rank 4 --moe-lora-topk 2
+
+# Dense gating example (top-k = num_experts), 5 experts, rank=8
+python main_AMSDF.py -bs 12 -tbs 64 --num_epoch 15 --seed 42 --save \
+  --moe-lora --moe-lora-experts 5 --moe-lora-rank 8 --moe-lora-topk 5
+```
+
+**Training with MoE-LoRA + data augmentation (MaskedSpec + MaskedFeature):**
+```bash
+# Sparse gating (top-k=2), 3 experts, rank=4, with aug
+python main_AMSDF.py -bs 12 -tbs 64 --num_epoch 15 --seed 1234 --save \
+  --moe-lora --moe-lora-experts 3 --moe-lora-rank 4 --moe-lora-topk 2 \
+  --mspec-p 0.5 --mspec-time 20 --mspec-freq 8 --mspec-num 2 \
+  --mfeat-p 0.2 --mfeat-axis time --mfeat-max-ratio 0.2
+
+# Dense gating (top-k=num_experts), 5 experts, rank=8, with aug
+python main_AMSDF.py -bs 12 -tbs 64 --num_epoch 15 --seed 42 --save \
+  --moe-lora --moe-lora-experts 5 --moe-lora-rank 8 --moe-lora-topk 5 \
+  --mspec-p 0.5 --mspec-time 20 --mspec-freq 8 --mspec-num 2 \
+  --mfeat-p 0.2 --mfeat-axis time --mfeat-max-ratio 0.2
+```
+
+**Data augmentation parameters:**
+- `--mspec-p`: Probability of applying spectrogram masking (MaskedSpec), default 0.0
+- `--mspec-time`: Maximum time width for masking, default 20
+- `--mspec-freq`: Maximum frequency width for masking, default 8
+- `--mspec-num`: Number of masks to apply, default 2
+- `--mfeat-p`: Probability of applying feature-level masking (MaskedFeature), default 0.0
+- `--mfeat-axis`: Masking axis ('time' or 'channel'), default 'time'
+- `--mfeat-max-ratio`: Maximum ratio of masked region, default 0.2
+
+**Note:** Data augmentation is automatically disabled during evaluation/testing. Set augmentation parameters to 0.0 to disable during training.
 
 
 

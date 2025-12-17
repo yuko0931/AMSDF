@@ -10,15 +10,134 @@ import os
 from .ACRNN import acrnn
 from .AASIST import *
 
+
+def apply_masked_feature(feat, p=0.0, max_width_ratio=0.2, axis="time"):
+    """
+    Feature-level masking: randomly zero a contiguous block along time or channel.
+    feat: torch.Tensor [..., T, C] or [..., C] shaped; expects 3D [B, T, C].
+    """
+    if p <= 0:
+        return feat
+    if torch.rand(1).item() > p:
+        return feat
+    x = feat
+    if x.dim() < 3:
+        return feat
+    B, T, C = x.shape
+    if axis == "channel":
+        width = max(1, int(C * max_width_ratio))
+        start = torch.randint(0, max(1, C - width + 1), (1,)).item()
+        mask = torch.ones_like(x)
+        mask[:, :, start:start + width] = 0
+        return x * mask
+    width = max(1, int(T * max_width_ratio))
+    start = torch.randint(0, max(1, T - width + 1), (1,)).item()
+    mask = torch.ones_like(x)
+    mask[:, start:start + width, :] = 0
+    return x * mask
+
+class LoRAExpert(nn.Module):
+    """A single low-rank adapter expert."""
+
+    def __init__(self, in_dim: int, out_dim: int, rank: int = 4):
+        super().__init__()
+        self.A = nn.Linear(in_dim, rank, bias=False)
+        self.B = nn.Linear(rank, out_dim, bias=False)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.B(self.A(x))
+
+
+class MoELoRALinear(nn.Module):
+    """
+    Wrap a frozen Linear with a mixture-of-LoRA experts + router.
+    Only router + experts are trainable.
+    """
+
+    def __init__(
+        self,
+        base_linear: nn.Linear,
+        num_experts: int = 3,
+        rank: int = 4,
+        top_k: int = 2,
+        router_noise: float = 0.0,
+    ):
+        super().__init__()
+        self.base = base_linear
+        for p in self.base.parameters():
+            p.requires_grad = False
+        self.num_experts = num_experts
+        self.top_k = max(1, min(top_k, num_experts))
+        self.router_noise = router_noise
+        self.router = nn.Linear(base_linear.in_features, num_experts, bias=False)
+        self.experts = nn.ModuleList(
+            [LoRAExpert(base_linear.in_features, base_linear.out_features, rank=rank) for _ in range(num_experts)]
+        )
+        self.in_features = base_linear.in_features
+        self.out_features = base_linear.out_features
+
+    def forward(self, x: Tensor) -> Tensor:
+        # x: [..., in_dim]
+        base_out = F.linear(x, self.base.weight, self.base.bias)
+        router_logits = self.router(x)
+        if self.router_noise > 0:
+            router_logits = router_logits + torch.randn_like(router_logits) * self.router_noise
+        gate = torch.softmax(router_logits, dim=-1)
+        if self.top_k < self.num_experts:
+            topk = torch.topk(gate, self.top_k, dim=-1)
+            gate = torch.zeros_like(gate).scatter(-1, topk.indices, topk.values)
+        gate = gate / (gate.sum(dim=-1, keepdim=True) + 1e-6)
+        lora_out = 0
+        for i, expert in enumerate(self.experts):
+            lora_out = lora_out + gate[..., i].unsqueeze(-1) * expert(x)
+        return base_out + lora_out
+
+    @property
+    def weight(self):
+        # expose frozen weight for downstream modules that access .weight
+        return self.base.weight
+
+    @property
+    def bias(self):
+        # expose frozen bias for downstream modules that access .bias
+        return self.base.bias
+
+
 class ASR_model(nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        moe_lora_enable: bool = False,
+        moe_lora_experts: int = 3,
+        moe_lora_rank: int = 4,
+        moe_lora_topk: int = 2,
+        moe_lora_router_noise: float = 0.0,
+    ):
         super(ASR_model, self).__init__()
         cp_path = os.path.join('./pretrained_models/xlsr2_300m.pt')   # Change the pre-trained XLSR model path. 
         model, cfg, task = fairseq.checkpoint_utils.load_model_ensemble_and_task([cp_path])
         self.model = model[0].cuda()
+        if moe_lora_enable:
+            self._inject_moe_lora(
+                num_experts=moe_lora_experts,
+                rank=moe_lora_rank,
+                top_k=moe_lora_topk,
+                router_noise=moe_lora_router_noise,
+            )
         self.linear = nn.Linear(1024, 128)
         self.bn = nn.BatchNorm1d(num_features=50)
         self.selu = nn.SELU(inplace=True)
+
+    def _inject_moe_lora(self, num_experts: int, rank: int, top_k: int, router_noise: float):
+        """
+        Replace q/k/v/out projections in each transformer layer with MoE-LoRA wrapped versions.
+        """
+        device = next(self.model.parameters()).device
+        for layer in self.model.encoder.layers:
+            attn = layer.self_attn
+            attn.q_proj = MoELoRALinear(attn.q_proj, num_experts=num_experts, rank=rank, top_k=top_k, router_noise=router_noise).to(device)
+            attn.k_proj = MoELoRALinear(attn.k_proj, num_experts=num_experts, rank=rank, top_k=top_k, router_noise=router_noise).to(device)
+            attn.v_proj = MoELoRALinear(attn.v_proj, num_experts=num_experts, rank=rank, top_k=top_k, router_noise=router_noise).to(device)
+            attn.out_proj = MoELoRALinear(attn.out_proj, num_experts=num_experts, rank=rank, top_k=top_k, router_noise=router_noise).to(device)
 
     def forward(self, x):
         emb = self.model(x, mask=False, features_only=True)['x']
@@ -114,12 +233,31 @@ class GRS(nn.Module):
 
 
 class Module(nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        feature_mask_p: float = 0.0,
+        feature_mask_axis: str = "time",
+        feature_mask_max_ratio: float = 0.2,
+        moe_lora_enable: bool = False,
+        moe_lora_experts: int = 3,
+        moe_lora_rank: int = 4,
+        moe_lora_topk: int = 2,
+        moe_lora_router_noise: float = 0.0,
+    ):
         super(Module, self).__init__()
         """multi-view feature extractor"""
-        self.text_view_extract=ASR_model()
+        self.text_view_extract=ASR_model(
+            moe_lora_enable=moe_lora_enable,
+            moe_lora_experts=moe_lora_experts,
+            moe_lora_rank=moe_lora_rank,
+            moe_lora_topk=moe_lora_topk,
+            moe_lora_router_noise=moe_lora_router_noise,
+        )
         self.emo_view_extract=SER_model()
         self.audio_view_extract=base_encoder()
+        self.feature_mask_p = feature_mask_p
+        self.feature_mask_axis = feature_mask_axis
+        self.feature_mask_max_ratio = feature_mask_max_ratio
         """IGAM"""
         self.GAT_text = GraphAttentionLayer(64, 64, temperature=2.0)
         self.pool_text = GraphPool(0.5, 64, 0.3)
@@ -147,6 +285,10 @@ class Module(nn.Module):
         audio_view=self.audio_view_extract(x, Freq_aug=Freq_aug) 
         emo_view=self.emo_view_extract(x2)
         text_view=self.text_view_extract(x)
+        if self.training and self.feature_mask_p>0:
+            audio_view = apply_masked_feature(audio_view, p=self.feature_mask_p, max_width_ratio=self.feature_mask_max_ratio, axis=self.feature_mask_axis)
+            emo_view = apply_masked_feature(emo_view, p=self.feature_mask_p, max_width_ratio=self.feature_mask_max_ratio, axis=self.feature_mask_axis)
+            text_view = apply_masked_feature(text_view, p=self.feature_mask_p, max_width_ratio=self.feature_mask_max_ratio, axis=self.feature_mask_axis)
         """ Intra-view graph attention module"""
         emo_gat = self.GAT_emo(emo_view) 
         audio_gat = self.GAT_audio(audio_view) 
